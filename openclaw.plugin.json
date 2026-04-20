@@ -1,0 +1,49 @@
+{
+  "id": "re-requirements-plugin",
+  "name": "RE Requirements Plugin",
+  "description": "Requirements engineering plugin for entity extraction, use case modeling, ER/CURD modeling, SRS generation, review, and artifact rendering.",
+  "version": "1.0.0",
+  "skills": ["./skills"],
+  "contracts": {
+    "tools": [
+      "requirement_scoper",
+      "use_case_writer",
+      "er_model_builder",
+      "curd_model_builder",
+      "model_reviewer",
+      "srs_writer",
+      "artifact_renderer"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "llmApiKey": {
+        "type": "string",
+        "description": "你的大模型 API Key"
+      },
+      "llmBaseUrl": {
+        "type": "string",
+        "description": "聊天补全接口地址，例如 https://xxx/v1/chat/completions"
+      },
+      "llmModel": {
+        "type": "string",
+        "description": "默认模型名，例如 ecnu-plus"
+      },
+      "plantumlJar": {
+        "type": "string",
+        "description": "PlantUML jar 的绝对路径或相对路径"
+      },
+      "tempDir": {
+        "type": "string",
+        "description": "临时目录"
+      },
+      "outputDir": {
+        "type": "string",
+        "description": "输出目录"
+      }
+    },
+    "required": ["llmApiKey", "llmBaseUrl"]
+  }
+}

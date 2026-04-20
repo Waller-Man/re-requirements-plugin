@@ -8,6 +8,6 @@
     "skipLibCheck": true,
     "outDir": "dist"
   },
-  "include": ["index.ts", "src/**/*.ts"],
+  "include": ["debug.ts", "src/**/*.ts"],
   "exclude": ["node_modules", "dist", "temp"]
 }

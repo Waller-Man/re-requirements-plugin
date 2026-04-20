@@ -20,7 +20,7 @@ export async function chatOnce(messages: ChatMessage[], model?: string): Promise
     {
       messages,
       model: model ?? config.LLM_MODEL,
-      //reasoning_effort: "minimal",   //豆包 test
+      reasoning_effort: "minimal",   //豆包 test
       stream: false,
     },
     {
@@ -28,7 +28,7 @@ export async function chatOnce(messages: ChatMessage[], model?: string): Promise
         "Content-Type": "application/json",
         Authorization: `Bearer ${config.LLM_API_KEY}`,
       },
-      timeout: 360000,
+      timeout: 600000,
     }
   );
 
