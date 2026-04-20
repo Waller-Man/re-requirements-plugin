@@ -57,7 +57,13 @@ function toText(data: unknown): string {
   return JSON.stringify(data, null, 2);
 }
 
-function toolResult(data: unknown) {
+function toolResult<T>(data: T): {
+  content: Array<{
+    type: "text";
+    text: string;
+  }>;
+  details: T;
+} {
   return {
     content: [
       {
@@ -65,10 +71,9 @@ function toolResult(data: unknown) {
         text: toText(data),
       },
     ],
-    structuredContent: data,
+    details: data,
   };
 }
-
 function requireNonEmptyString(name: string, value: unknown): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(`${name} 不能为空`);
@@ -514,14 +519,29 @@ export default definePluginEntry({
       description:
         "根据当前需求模型文本做综合评审。按你当前项目逻辑，重点传 simple use case 文本。",
       parameters: {
-        type: "object",
-        properties: {
-          softwareIntro: { type: "string" },
-          fullUseCaseText: { type: "string" },
-        },
-        required: ["softwareIntro", "fullUseCaseText"],
-        additionalProperties: false,
-      },
+  type: "object",
+  properties: {
+    softwareIntro: { type: "string" },
+    dataEntities: {
+      type: "array",
+      items: { type: "string" }
+    },
+    useCases: {
+      type: "array",
+      items: { type: "string" }
+    },
+    erModelText: { type: "string" },
+    fullUseCaseText: { type: "string" },
+  },
+  required: [
+    "softwareIntro",
+    "dataEntities",
+    "useCases",
+    "erModelText",
+    "fullUseCaseText"
+  ],
+  additionalProperties: false,
+},
       async execute(_toolCallId: string, params: any) {
         applyPluginConfigToEnv(pluginConfig);
         ensureRequiredEnv();
@@ -529,12 +549,15 @@ export default definePluginEntry({
         const { reviewRequirementModel } = await import("./src/tools/model_reviewer.js");
 
         const result = await reviewRequirementModel({
-          softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-          fullUseCaseText: requireNonEmptyString(
-            "fullUseCaseText",
-            params?.fullUseCaseText,
-          ),
-        });
+  softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
+  dataEntities: requireStringArray("dataEntities", params?.dataEntities),
+  useCases: requireStringArray("useCases", params?.useCases),
+  erModelText: requireNonEmptyString("erModelText", params?.erModelText),
+  fullUseCaseText: requireNonEmptyString(
+    "fullUseCaseText",
+    params?.fullUseCaseText,
+  ),
+});
 
         return toolResult(result);
       },
