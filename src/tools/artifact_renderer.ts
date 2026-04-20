@@ -75,7 +75,7 @@ async function runPlantUmlJar(pumlPath: string): Promise<void> {
     let stdout = "";
     let stderr = "";
 
-    child.stdout.on("data", (chunk: Buffer) => {
+child.stdout.on("data", (chunk: Buffer) => {
   stdout += chunk.toString();
 });
 
@@ -111,6 +111,8 @@ child.on("close", (code: number | null) => {
     )
   );
 });
+  });
+}
 
 // =========================
 // 1) PlantUML 图片渲染
