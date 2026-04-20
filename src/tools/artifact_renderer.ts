@@ -75,40 +75,42 @@ async function runPlantUmlJar(pumlPath: string): Promise<void> {
     let stdout = "";
     let stderr = "";
 
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
+    child.stdout.on("data", (chunk: Buffer) => {
+  stdout += chunk.toString();
+});
 
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
+child.stderr.on("data", (chunk: Buffer) => {
+  stderr += chunk.toString();
+});
 
-    child.on("error", (error) => {
-      reject(
-        new Error(`无法启动 PlantUML 渲染进程：${error instanceof Error ? error.message : String(error)}`)
-      );
-    });
+child.on("error", (error: Error) => {
+  reject(
+    new Error(
+      `无法启动 PlantUML 渲染进程：${
+        error instanceof Error ? error.message : String(error)
+      }`
+    )
+  );
+});
 
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
+child.on("close", (code: number | null) => {
+  if (code === 0) {
+    resolve();
+    return;
+  }
 
-      reject(
-        new Error(
-          [
-            `PlantUML 渲染失败，退出码：${code ?? "unknown"}`,
-            stdout.trim() ? `stdout:\n${stdout.trim()}` : "",
-            stderr.trim() ? `stderr:\n${stderr.trim()}` : "",
-          ]
-            .filter(Boolean)
-            .join("\n\n")
-        )
-      );
-    });
-  });
-}
+  reject(
+    new Error(
+      [
+        `PlantUML 渲染失败，退出码：${code ?? "unknown"}`,
+        stdout.trim() ? `stdout:\n${stdout.trim()}` : "",
+        stderr.trim() ? `stderr:\n${stderr.trim()}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    )
+  );
+});
 
 // =========================
 // 1) PlantUML 图片渲染

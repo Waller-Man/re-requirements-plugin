@@ -3,11 +3,13 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "outDir": "dist",
+    "rootDir": ".",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "outDir": "dist"
+    "types": ["node"]
   },
-  "include": ["debug.ts", "src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "temp"]
+  "include": ["index.ts", "src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "debug.ts"]
 }
