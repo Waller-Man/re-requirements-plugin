@@ -1,8 +1,8 @@
 {
   "id": "re-requirements-plugin",
   "name": "RE Requirements Plugin",
-  "description": "Requirements engineering plugin for entity extraction, use case modeling, ER/CURD modeling, SRS generation, review, and artifact rendering.",
-  "version": "1.0.0",
+  "description": "Requirements engineering plugin for entity extraction, use case modeling, ER/CURD modeling, functional requirements generation, and document exporting.",
+  "version": "1.1.0",
   "skills": ["./skills"],
   "contracts": {
     "tools": [
@@ -10,9 +10,7 @@
       "use_case_writer",
       "er_model_builder",
       "curd_model_builder",
-      "model_reviewer",
-      "srs_writer",
-      "artifact_renderer"
+      "document_exporter"
     ]
   },
   "configSchema": {
