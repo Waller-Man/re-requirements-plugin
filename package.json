@@ -1,11 +1,14 @@
 {
   "name": "re-requirements-plugin",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "OpenClaw plugin for requirements engineering workflow",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
     ".": "./dist/index.js"
+  },
+  "openclaw": {
+    "extensions": ["./dist/index.js"]
   },
   "files": [
     "dist",
