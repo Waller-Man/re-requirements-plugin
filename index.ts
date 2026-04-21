@@ -74,6 +74,7 @@ function toolResult<T>(data: T): {
     details: data,
   };
 }
+
 function requireNonEmptyString(name: string, value: unknown): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(`${name} 不能为空`);
@@ -109,17 +110,6 @@ function requireStringArray(name: string, value: unknown): string[] {
   return arr;
 }
 
-function optionalStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value
-    .filter((item) => typeof item === "string")
-    .map((item) => item.trim())
-    .filter(Boolean) as string[];
-}
-
 function requireCurdTriples(name: string, value: unknown): CurdTriple[] {
   if (!Array.isArray(value)) {
     throw new Error(`${name} 必须是 CURD 三元组数组`);
@@ -150,7 +140,7 @@ export default definePluginEntry({
   id: "re-requirements-plugin",
   name: "RE Requirements Plugin",
   description:
-    "Requirements engineering plugin for entity extraction, use case modeling, ER/CURD modeling, SRS generation, review, and artifact rendering.",
+    "Requirements engineering plugin for entity extraction, use case modeling, ER/CURD modeling, and document exporting.",
   register(api) {
     const pluginConfig = (api.pluginConfig ?? {}) as PluginConfig;
 
@@ -161,8 +151,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "requirement_scoper",
       label: "Requirement Scoper",
-      description:
-        "从软件需求简介中抽取核心数据实体和初始用例列表。",
+      description: "从软件需求简介中抽取核心数据实体和初始用例列表。",
       parameters: {
         type: "object",
         properties: {
@@ -191,8 +180,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "use_case_writer",
       label: "Use Case Writer",
-      description:
-        "生成简单用例描述、补充新用例、生成功能需求文本、生成用例图代码。",
+      description: "生成简单用例描述、补充新用例、生成功能需求文本、生成用例图代码。",
       parameters: {
         type: "object",
         properties: {
@@ -297,8 +285,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "er_model_builder",
       label: "ER Model Builder",
-      description:
-        "生成 ER 模型、检查 ER 模型、补全 ER 模型、生成 ER 图代码。",
+      description: "生成 ER 模型、检查 ER 模型、补全 ER 模型、生成 ER 图代码。",
       parameters: {
         type: "object",
         properties: {
@@ -384,8 +371,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "curd_model_builder",
       label: "CURD Model Builder",
-      description:
-        "生成 CURD 三元组、检查 CURD 完整性、补全 CURD、转成矩阵。",
+      description: "生成 CURD 三元组、检查 CURD 完整性、补全 CURD、转成矩阵。",
       parameters: {
         type: "object",
         properties: {
@@ -514,272 +500,75 @@ export default definePluginEntry({
     });
 
     api.registerTool({
-      name: "model_reviewer",
-      label: "Model Reviewer",
+      name: "document_exporter",
+      label: "Document Exporter",
       description:
-        "根据当前需求模型文本做综合评审。按你当前项目逻辑，重点传 simple use case 文本。",
+        "导出三个文档：ER 模型文档、修改后的用例模型文档、功能需求文档。",
       parameters: {
-  type: "object",
-  properties: {
-    softwareIntro: { type: "string" },
-    dataEntities: {
-      type: "array",
-      items: { type: "string" }
-    },
-    useCases: {
-      type: "array",
-      items: { type: "string" }
-    },
-    erModelText: { type: "string" },
-    fullUseCaseText: { type: "string" },
-  },
-  required: [
-    "softwareIntro",
-    "dataEntities",
-    "useCases",
-    "erModelText",
-    "fullUseCaseText"
-  ],
-  additionalProperties: false,
-},
+        type: "object",
+        properties: {
+          projectName: { type: "string" },
+          erModelText: { type: "string" },
+          updatedUseCaseText: { type: "string" },
+          functionalRequirementsText: { type: "string" },
+          softwareIntro: { type: "string" },
+          dataEntities: {
+            type: "array",
+            items: { type: "string" },
+          },
+          useCases: {
+            type: "array",
+            items: { type: "string" },
+          },
+          artifactPrefix: { type: "string" },
+          outputDir: { type: "string" },
+        },
+        required: [
+          "projectName",
+          "erModelText",
+          "updatedUseCaseText",
+          "functionalRequirementsText",
+        ],
+        additionalProperties: false,
+      },
       async execute(_toolCallId: string, params: any) {
         applyPluginConfigToEnv(pluginConfig);
         ensureRequiredEnv();
 
-        const { reviewRequirementModel } = await import("./src/tools/model_reviewer.js");
+        const { exportRequirementsDocuments } = await import(
+          "./src/tools/document_exporter.js"
+        );
 
-        const result = await reviewRequirementModel({
-  softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-  dataEntities: requireStringArray("dataEntities", params?.dataEntities),
-  useCases: requireStringArray("useCases", params?.useCases),
-  erModelText: requireNonEmptyString("erModelText", params?.erModelText),
-  fullUseCaseText: requireNonEmptyString(
-    "fullUseCaseText",
-    params?.fullUseCaseText,
-  ),
-});
+        const result = await exportRequirementsDocuments({
+          projectName: requireNonEmptyString("projectName", params?.projectName),
+          erModelText: requireNonEmptyString("erModelText", params?.erModelText),
+          updatedUseCaseText: requireNonEmptyString(
+            "updatedUseCaseText",
+            params?.updatedUseCaseText,
+          ),
+          functionalRequirementsText: requireNonEmptyString(
+            "functionalRequirementsText",
+            params?.functionalRequirementsText,
+          ),
+          softwareIntro:
+            typeof params?.softwareIntro === "string"
+              ? params.softwareIntro
+              : undefined,
+          dataEntities: Array.isArray(params?.dataEntities)
+            ? requireStringArray("dataEntities", params?.dataEntities)
+            : undefined,
+          useCases: Array.isArray(params?.useCases)
+            ? requireStringArray("useCases", params?.useCases)
+            : undefined,
+          artifactPrefix:
+            typeof params?.artifactPrefix === "string"
+              ? params.artifactPrefix
+              : undefined,
+          outputDir:
+            typeof params?.outputDir === "string" ? params.outputDir : undefined,
+        });
 
         return toolResult(result);
-      },
-    });
-
-    api.registerTool({
-      name: "srs_writer",
-      label: "SRS Writer",
-      description:
-        "生成 SRS 各章节：Introduction、Overall Description、External Interface、Nonfunctional Requirements。",
-      parameters: {
-        type: "object",
-        properties: {
-          action: {
-            type: "string",
-            enum: [
-              "generate_introduction",
-              "generate_overall_description",
-              "generate_external_interface",
-              "generate_nonfunctional_requirement",
-            ],
-          },
-          softwareIntro: { type: "string" },
-          dataEntities: {
-            type: "array",
-            items: { type: "string" },
-          },
-          useCases: {
-            type: "array",
-            items: { type: "string" },
-          },
-          erModelText: { type: "string" },
-          simpleUseCaseText: { type: "string" },
-          functionalRequirementsText: { type: "string" },
-          overallDescriptionText: { type: "string" },
-        },
-        required: ["action"],
-        additionalProperties: false,
-      },
-      async execute(_toolCallId: string, params: any) {
-        applyPluginConfigToEnv(pluginConfig);
-        ensureRequiredEnv();
-
-        const action = requireNonEmptyString("action", params?.action);
-
-        const {
-          generateIntroduction,
-          generateOverallDescription,
-          generateExternalInterface,
-          generateNonfunctionalRequirement,
-        } = await import("./src/tools/srs_writer.js");
-
-        switch (action) {
-          case "generate_introduction": {
-            const result = await generateIntroduction({
-              softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-              dataEntities: requireStringArray("dataEntities", params?.dataEntities),
-              useCases: requireStringArray("useCases", params?.useCases),
-              erModelText: requireNonEmptyString("erModelText", params?.erModelText),
-              simpleUseCaseText: requireNonEmptyString(
-                "simpleUseCaseText",
-                params?.simpleUseCaseText,
-              ),
-            });
-            return toolResult(result);
-          }
-
-          case "generate_overall_description": {
-            const result = await generateOverallDescription({
-              softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-              dataEntities: requireStringArray("dataEntities", params?.dataEntities),
-              useCases: requireStringArray("useCases", params?.useCases),
-              erModelText: requireNonEmptyString("erModelText", params?.erModelText),
-              simpleUseCaseText: requireNonEmptyString(
-                "simpleUseCaseText",
-                params?.simpleUseCaseText,
-              ),
-            });
-            return toolResult(result);
-          }
-
-          case "generate_external_interface": {
-            const result = await generateExternalInterface({
-              softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-              functionalRequirementsText: requireNonEmptyString(
-                "functionalRequirementsText",
-                params?.functionalRequirementsText,
-              ),
-            });
-            return toolResult(result);
-          }
-
-          case "generate_nonfunctional_requirement": {
-            const result = await generateNonfunctionalRequirement({
-              softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-              overallDescriptionText: requireNonEmptyString(
-                "overallDescriptionText",
-                params?.overallDescriptionText,
-              ),
-              simpleUseCaseText: requireNonEmptyString(
-                "simpleUseCaseText",
-                params?.simpleUseCaseText,
-              ),
-            });
-            return toolResult(result);
-          }
-
-          default:
-            throw new Error(`未知 action: ${action}`);
-        }
-      },
-    });
-
-    api.registerTool({
-      name: "artifact_renderer",
-      label: "Artifact Renderer",
-      description:
-        "渲染用例图、渲染 ER 图、导出 Markdown 文档。",
-      parameters: {
-        type: "object",
-        properties: {
-          action: {
-            type: "string",
-            enum: [
-              "render_use_case_diagram",
-              "render_er_diagram",
-              "export_project_markdown",
-            ],
-          },
-          useCaseDiagramCode: { type: "string" },
-          erDiagramCode: { type: "string" },
-          artifactName: { type: "string" },
-
-          title: { type: "string" },
-          softwareIntro: { type: "string" },
-          dataEntities: {
-            type: "array",
-            items: { type: "string" },
-          },
-          useCases: {
-            type: "array",
-            items: { type: "string" },
-          },
-          simpleUseCaseText: { type: "string" },
-          erModelText: { type: "string" },
-          functionalRequirementsText: { type: "string" },
-          reviewText: { type: "string" },
-          introductionText: { type: "string" },
-          overallDescriptionText: { type: "string" },
-          externalInterfaceText: { type: "string" },
-          nonfunctionalRequirementText: { type: "string" },
-          useCaseDiagramPngPath: { type: "string" },
-          erDiagramPngPath: { type: "string" },
-        },
-        required: ["action"],
-        additionalProperties: false,
-      },
-      async execute(_toolCallId: string, params: any) {
-        applyPluginConfigToEnv(pluginConfig);
-        ensureRequiredEnv();
-
-        const action = requireNonEmptyString("action", params?.action);
-
-        const {
-          renderUseCaseDiagram,
-          renderErDiagram,
-          exportProjectMarkdown,
-        } = await import("./src/tools/artifact_renderer.js");
-
-        switch (action) {
-          case "render_use_case_diagram": {
-            const result = await renderUseCaseDiagram({
-              useCaseDiagramCode: requireNonEmptyString(
-                "useCaseDiagramCode",
-                params?.useCaseDiagramCode,
-              ),
-              artifactName: optionalString(params?.artifactName, "use_case_diagram"),
-            });
-            return toolResult(result);
-          }
-
-          case "render_er_diagram": {
-            const result = await renderErDiagram({
-              erDiagramCode: requireNonEmptyString("erDiagramCode", params?.erDiagramCode),
-              artifactName: optionalString(params?.artifactName, "er_diagram"),
-            });
-            return toolResult(result);
-          }
-
-          case "export_project_markdown": {
-            const result = await exportProjectMarkdown({
-              title: requireNonEmptyString("title", params?.title),
-              softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-              dataEntities: requireStringArray("dataEntities", params?.dataEntities),
-              useCases: requireStringArray("useCases", params?.useCases),
-              simpleUseCaseText: requireNonEmptyString(
-                "simpleUseCaseText",
-                params?.simpleUseCaseText,
-              ),
-              erModelText: requireNonEmptyString("erModelText", params?.erModelText),
-              functionalRequirementsText: optionalString(
-                params?.functionalRequirementsText,
-                "",
-              ),
-              reviewText: optionalString(params?.reviewText, ""),
-              introductionText: optionalString(params?.introductionText, ""),
-              overallDescriptionText: optionalString(params?.overallDescriptionText, ""),
-              externalInterfaceText: optionalString(params?.externalInterfaceText, ""),
-              nonfunctionalRequirementText: optionalString(
-                params?.nonfunctionalRequirementText,
-                "",
-              ),
-              useCaseDiagramPngPath: optionalString(params?.useCaseDiagramPngPath, ""),
-              erDiagramPngPath: optionalString(params?.erDiagramPngPath, ""),
-              artifactName: optionalString(params?.artifactName, "requirements_artifacts"),
-            });
-            return toolResult(result);
-          }
-
-          default:
-            throw new Error(`未知 action: ${action}`);
-        }
       },
     });
   },
