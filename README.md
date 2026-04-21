@@ -64,6 +64,16 @@ npm install
 npm run check
 npm run debug
 ```
+**注意！** 你若在本地运行`npm run debug`,请在项目根目录下配置.env文件，配置的要求如下
+```text
+LLM_API_KEY=你的APIKEY
+LLM_BASE_URL=大模型服务商的URL
+LLM_MODEL=模型名称
+TEMP_DIR=./temp
+OUTPUT_DIR=./temp
+```
+
+本项目主要采用火山引擎和ecnu等大模型服务商,若您想使用不同的大模型服务商，请根据对应服务商的要求修改`llmClient.ts`文件。
 
 ---
 
@@ -80,7 +90,7 @@ openclaw plugins install /path/to/re-requirements-plugin
 #### 方式 B：从 `.tgz` 安装
 
 ```bash
-openclaw plugins install /path/to/re-requirements-plugin-1.1.0.tgz
+openclaw plugins install /path/to/re-requirements-plugin-1.0.0.tgz
 ```
 
 **建议使用方法B**安装，使用A方式安装，有概率出现`manifest dependency scan exceeded max directories (10000)`错误。
@@ -141,7 +151,7 @@ plugins.entries.re-requirements-plugin.config
 
 
 
-### 4. 重启 OpenClaw Gateway
+### 4. 不要忘了重启 OpenClaw Gateway！
 
 安装并配置完成后，重启 gateway：
 
@@ -174,7 +184,7 @@ openclaw plugins inspect re-requirements-plugin
 ## Skill 的使用方式
 
 本插件随插件一起提供 skill。
-OpenClaw 支持插件通过 `openclaw.plugin.json` 中的 `skills` 目录携带 skill；当插件启用后，这些 skill 会被加载。([GitHub][2])
+OpenClaw 支持插件通过 `openclaw.plugin.json` 中的 `skills` 目录携带 skill；当插件启用后，这些 skill 会被加载。
 
 在对话里，最稳的调用方式是：
 
@@ -182,11 +192,6 @@ OpenClaw 支持插件通过 `openclaw.plugin.json` 中的 `skills` 目录携带 
 /skill requirements-completion 我需要一个简单的12306订票系统，请完成实体抽取、用例建模、ER建模、CURD检查，并导出三个文档。
 ```
 
-OpenClaw 的 slash command 文档明确说明：
-
-* `/skill <name> [input]` 是通用入口
-* 用户可调用的 skill 会作为 slash command 暴露
-* skill 默认会被转发为普通请求交给模型执行 ([GitHub][3])
 
 ---
 
@@ -245,20 +250,8 @@ re-requirements-plugin/
 └── README.md
 ```
 
----
 
-## 本地开发建议
 
-开发时建议按下面的顺序循环：
-
-```bash
-npm run check
-npm run debug
-openclaw gateway restart
-openclaw plugins inspect re-requirements-plugin
-```
-
-如果你改的是插件源码本身，而不是只改 `openclaw.json`，建议重新打包或重新安装后再测试。
 
 ---
 
@@ -269,7 +262,7 @@ openclaw plugins inspect re-requirements-plugin
 ### 安装
 
 ```bash
-openclaw plugins install /path/to/re-requirements-plugin-1.1.0.tgz
+openclaw plugins install /path/to/re-requirements-plugin-1.0.0.tgz
 ```
 
 ### 配置
