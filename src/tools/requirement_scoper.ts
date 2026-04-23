@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { chatOnce } from "../llmClient.js";
 import { config } from "../config.js";
+import { saveArtifactAndBuildResult } from "../artifact_io.js";
 
 // 输入 schema：当前 tool 只需要一段软件需求描述
 export const RequirementScoperInputSchema = z.object({
@@ -9,15 +10,27 @@ export const RequirementScoperInputSchema = z.object({
 
 export type RequirementScoperInput = z.infer<typeof RequirementScoperInputSchema>;
 
-// 输出 schema：同时保留原始文本和拆分后的数组，方便后续 tool 继续使用
+// 轻量输出 schema：不再把大结果直接返回给模型
 export const RequirementScoperOutputSchema = z.object({
+  status: z.enum(["success", "error"]),
+  summary: z.string(),
+  outputPath: z.string().optional(),
+  outputType: z.string().optional(),
+});
+
+export type RequirementScoperOutput = z.infer<typeof RequirementScoperOutputSchema>;
+
+// 真正写入文件的完整内容结构
+export const RequirementScoperArtifactSchema = z.object({
   dataEntitiesText: z.string(),
   useCasesText: z.string(),
   dataEntities: z.array(z.string()),
   useCases: z.array(z.string()),
 });
 
-export type RequirementScoperOutput = z.infer<typeof RequirementScoperOutputSchema>;
+export type RequirementScoperArtifact = z.infer<
+  typeof RequirementScoperArtifactSchema
+>;
 
 // 兼容中英文逗号、顿号的简单拆分函数
 function splitCommaLike(text: string): string[] {
@@ -92,7 +105,7 @@ Please answer in English.
 `.trim();
 }
 
-// 第一个 tool：输入需求文本，输出核心实体和初始用例
+// 第一个 tool：输入需求文本，输出文件路径而不是大正文
 export async function requirementScoper(
   input: RequirementScoperInput
 ): Promise<RequirementScoperOutput> {
@@ -113,17 +126,33 @@ export async function requirementScoper(
   const useCasesText = await chatOnce(
     [
       { role: "system", content: "You are a requirements engineering expert." },
-      { role: "user", content: buildUseCasePrompt(parsedInput.softwareIntro, dataEntities) },
+      {
+        role: "user",
+        content: buildUseCasePrompt(parsedInput.softwareIntro, dataEntities),
+      },
     ],
     config.LLM_MODEL
   );
 
   const useCases = splitCommaLike(useCasesText);
 
-  return RequirementScoperOutputSchema.parse({
-    dataEntitiesText,
-    useCasesText,
-    dataEntities,
-    useCases,
-  });
+  // 这里才是真正的大结果，写到文件里供后续 tool 读取
+  const artifact: RequirementScoperArtifact =
+    RequirementScoperArtifactSchema.parse({
+      dataEntitiesText,
+      useCasesText,
+      dataEntities,
+      useCases,
+    });
+
+  // 返回轻量结果，避免把大对象直接塞回模型上下文
+  return RequirementScoperOutputSchema.parse(
+    await saveArtifactAndBuildResult({
+      stage: "requirement_scoper",
+      name: "requirement_scoper_result",
+      data: artifact,
+      extension: "json",
+      summary: `Requirement scoping completed. Extracted ${dataEntities.length} data entities and ${useCases.length} use cases.`,
+    })
+  );
 }

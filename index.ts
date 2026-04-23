@@ -9,10 +9,11 @@ type PluginConfig = {
   outputDir?: string;
 };
 
-type CurdTriple = {
-  entity: string;
-  useCase: string;
-  operation: "C" | "U" | "R" | "D";
+type PathBasedToolResult = {
+  status: "success" | "error";
+  summary: string;
+  outputPath?: string;
+  outputType?: string;
 };
 
 function applyPluginConfigToEnv(config: PluginConfig = {}) {
@@ -45,34 +46,9 @@ function ensureRequiredEnv() {
 
   if (missing.length > 0) {
     throw new Error(
-      `插件缺少必要配置：${missing.join("、")}。请先在 openclaw.json 里补齐。`,
+      `插件缺少必要配置：${missing.join("、")}。请先在 openclaw.json 里补齐。`
     );
   }
-}
-
-function toText(data: unknown): string {
-  if (typeof data === "string") {
-    return data;
-  }
-  return JSON.stringify(data, null, 2);
-}
-
-function toolResult<T>(data: T): {
-  content: Array<{
-    type: "text";
-    text: string;
-  }>;
-  details: T;
-} {
-  return {
-    content: [
-      {
-        type: "text",
-        text: toText(data),
-      },
-    ],
-    details: data,
-  };
 }
 
 function requireNonEmptyString(name: string, value: unknown): string {
@@ -80,13 +56,6 @@ function requireNonEmptyString(name: string, value: unknown): string {
     throw new Error(`${name} 不能为空`);
   }
   return value.trim();
-}
-
-function optionalString(value: unknown, fallback = ""): string {
-  if (typeof value !== "string") {
-    return fallback;
-  }
-  return value;
 }
 
 function requireStringArray(name: string, value: unknown): string[] {
@@ -110,30 +79,37 @@ function requireStringArray(name: string, value: unknown): string[] {
   return arr;
 }
 
-function requireCurdTriples(name: string, value: unknown): CurdTriple[] {
-  if (!Array.isArray(value)) {
-    throw new Error(`${name} 必须是 CURD 三元组数组`);
+function optionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
   }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
 
-  return value.map((item, index) => {
-    if (!item || typeof item !== "object") {
-      throw new Error(`${name}[${index}] 格式不正确`);
-    }
+function toolResult<T extends PathBasedToolResult>(data: T): {
+  content: Array<{
+    type: "text";
+    text: string;
+  }>;
+  details: T;
+} {
+  const lines = [
+    `status: ${data.status}`,
+    `summary: ${data.summary}`,
+    ...(data.outputPath ? [`outputPath: ${data.outputPath}`] : []),
+    ...(data.outputType ? [`outputType: ${data.outputType}`] : []),
+  ];
 
-    const triple = item as Record<string, unknown>;
-    const entity = requireNonEmptyString(`${name}[${index}].entity`, triple.entity);
-    const useCase = requireNonEmptyString(`${name}[${index}].useCase`, triple.useCase);
-    const operation = requireNonEmptyString(
-      `${name}[${index}].operation`,
-      triple.operation,
-    ) as CurdTriple["operation"];
-
-    if (!["C", "U", "R", "D"].includes(operation)) {
-      throw new Error(`${name}[${index}].operation 必须是 C/U/R/D`);
-    }
-
-    return { entity, useCase, operation };
-  });
+  return {
+    content: [
+      {
+        type: "text",
+        text: lines.join("\n"),
+      },
+    ],
+    details: data,
+  };
 }
 
 export default definePluginEntry({
@@ -151,7 +127,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "requirement_scoper",
       label: "Requirement Scoper",
-      description: "从软件需求简介中抽取核心数据实体和初始用例列表。",
+      description: "从软件需求简介中抽取核心数据实体和初始用例列表，并将结果写入文件。",
       parameters: {
         type: "object",
         properties: {
@@ -180,7 +156,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "use_case_writer",
       label: "Use Case Writer",
-      description: "生成简单用例描述、补充新用例、生成功能需求文本、生成用例图代码。",
+      description: "生成基础用例描述、补充新用例、生成功能需求文本，均以文件路径作为中间输入输出。",
       parameters: {
         type: "object",
         properties: {
@@ -190,32 +166,26 @@ export default definePluginEntry({
               "generate_simple_use_cases",
               "generate_new_use_cases",
               "generate_functional_requirements",
-              "generate_use_case_diagram_code",
             ],
             description: "要执行的 use_case_writer 子操作",
           },
           softwareIntro: {
             type: "string",
           },
-          dataEntities: {
-            type: "array",
-            items: { type: "string" },
+          scoperResultPath: {
+            type: "string",
           },
-          useCases: {
-            type: "array",
-            items: { type: "string" },
-          },
-          existingSimpleUseCaseText: {
+          existingSimpleUseCasePath: {
             type: "string",
           },
           newUseCases: {
             type: "array",
             items: { type: "string" },
           },
-          erModel: {
+          erModelPath: {
             type: "string",
           },
-          simpleUseCaseText: {
+          simpleUseCasePath: {
             type: "string",
           },
         },
@@ -232,15 +202,16 @@ export default definePluginEntry({
           generateSimpleUseCases,
           generateNewUseCases,
           generateFunctionalRequirements,
-          generateUseCaseDiagramCode,
         } = await import("./src/tools/use_case_writer.js");
 
         switch (action) {
           case "generate_simple_use_cases": {
             const result = await generateSimpleUseCases({
               softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-              dataEntities: requireStringArray("dataEntities", params?.dataEntities),
-              useCases: requireStringArray("useCases", params?.useCases),
+              scoperResultPath: requireNonEmptyString(
+                "scoperResultPath",
+                params?.scoperResultPath
+              ),
             });
             return toolResult(result);
           }
@@ -248,9 +219,9 @@ export default definePluginEntry({
           case "generate_new_use_cases": {
             const result = await generateNewUseCases({
               softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-              existingSimpleUseCaseText: requireNonEmptyString(
-                "existingSimpleUseCaseText",
-                params?.existingSimpleUseCaseText,
+              existingSimpleUseCasePath: requireNonEmptyString(
+                "existingSimpleUseCasePath",
+                params?.existingSimpleUseCasePath
               ),
               newUseCases: requireStringArray("newUseCases", params?.newUseCases),
             });
@@ -260,18 +231,11 @@ export default definePluginEntry({
           case "generate_functional_requirements": {
             const result = await generateFunctionalRequirements({
               softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-              erModel: requireNonEmptyString("erModel", params?.erModel),
-              simpleUseCaseText: requireNonEmptyString(
-                "simpleUseCaseText",
-                params?.simpleUseCaseText,
+              erModelPath: requireNonEmptyString("erModelPath", params?.erModelPath),
+              simpleUseCasePath: requireNonEmptyString(
+                "simpleUseCasePath",
+                params?.simpleUseCasePath
               ),
-            });
-            return toolResult(result);
-          }
-
-          case "generate_use_case_diagram_code": {
-            const result = await generateUseCaseDiagramCode({
-              useCases: requireStringArray("useCases", params?.useCases),
             });
             return toolResult(result);
           }
@@ -285,7 +249,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "er_model_builder",
       label: "ER Model Builder",
-      description: "生成 ER 模型、检查 ER 模型、补全 ER 模型、生成 ER 图代码。",
+      description: "生成 ER 模型、检查 ER 模型、补全 ER 模型，均以文件路径作为中间输入输出。",
       parameters: {
         type: "object",
         properties: {
@@ -295,21 +259,13 @@ export default definePluginEntry({
               "generate_er_model",
               "check_er_model",
               "complete_er_model",
-              "generate_er_code",
             ],
           },
           softwareIntro: { type: "string" },
-          dataEntities: {
-            type: "array",
-            items: { type: "string" },
-          },
-          useCases: {
-            type: "array",
-            items: { type: "string" },
-          },
-          erModelText: { type: "string" },
-          oldErModelText: { type: "string" },
-          newUseCaseText: { type: "string" },
+          scoperResultPath: { type: "string" },
+          erModelPath: { type: "string" },
+          oldErModelPath: { type: "string" },
+          newUseCasePath: { type: "string" },
         },
         required: ["action"],
         additionalProperties: false,
@@ -324,15 +280,16 @@ export default definePluginEntry({
           generateErModel,
           checkErModel,
           completeErModel,
-          generateErCode,
         } = await import("./src/tools/er_model_builder.js");
 
         switch (action) {
           case "generate_er_model": {
             const result = await generateErModel({
               softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-              dataEntities: requireStringArray("dataEntities", params?.dataEntities),
-              useCases: requireStringArray("useCases", params?.useCases),
+              scoperResultPath: requireNonEmptyString(
+                "scoperResultPath",
+                params?.scoperResultPath
+              ),
             });
             return toolResult(result);
           }
@@ -340,24 +297,25 @@ export default definePluginEntry({
           case "check_er_model": {
             const result = await checkErModel({
               softwareIntro: requireNonEmptyString("softwareIntro", params?.softwareIntro),
-              dataEntities: requireStringArray("dataEntities", params?.dataEntities),
-              useCases: requireStringArray("useCases", params?.useCases),
-              erModelText: requireNonEmptyString("erModelText", params?.erModelText),
+              scoperResultPath: requireNonEmptyString(
+                "scoperResultPath",
+                params?.scoperResultPath
+              ),
+              erModelPath: requireNonEmptyString("erModelPath", params?.erModelPath),
             });
             return toolResult(result);
           }
 
           case "complete_er_model": {
             const result = await completeErModel({
-              oldErModelText: requireNonEmptyString("oldErModelText", params?.oldErModelText),
-              newUseCaseText: requireNonEmptyString("newUseCaseText", params?.newUseCaseText),
-            });
-            return toolResult(result);
-          }
-
-          case "generate_er_code": {
-            const result = await generateErCode({
-              erModelText: requireNonEmptyString("erModelText", params?.erModelText),
+              oldErModelPath: requireNonEmptyString(
+                "oldErModelPath",
+                params?.oldErModelPath
+              ),
+              newUseCasePath: requireNonEmptyString(
+                "newUseCasePath",
+                params?.newUseCasePath
+              ),
             });
             return toolResult(result);
           }
@@ -371,7 +329,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "curd_model_builder",
       label: "CURD Model Builder",
-      description: "生成 CURD 三元组、检查 CURD 完整性、补全 CURD、转成矩阵。",
+      description: "生成 CURD 三元组、检查 CURD 完整性、补全 CURD、转成矩阵，均以文件路径作为中间输入输出。",
       parameters: {
         type: "object",
         properties: {
@@ -384,50 +342,27 @@ export default definePluginEntry({
               "convert_curd_triples_to_matrix",
             ],
           },
-          dataEntities: {
-            type: "array",
-            items: { type: "string" },
+          scoperResultPath: {
+            type: "string",
           },
-          useCases: {
-            type: "array",
-            items: { type: "string" },
+          useCaseDescriptionPath: {
+            type: "string",
           },
-          useCaseDescriptionText: { type: "string" },
-          erModelText: { type: "string" },
-          curdTriples: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                entity: { type: "string" },
-                useCase: { type: "string" },
-                operation: {
-                  type: "string",
-                  enum: ["C", "U", "R", "D"],
-                },
-              },
-              required: ["entity", "useCase", "operation"],
-              additionalProperties: false,
-            },
+          erModelPath: {
+            type: "string",
           },
-          previousCurdTriples: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                entity: { type: "string" },
-                useCase: { type: "string" },
-                operation: {
-                  type: "string",
-                  enum: ["C", "U", "R", "D"],
-                },
-              },
-              required: ["entity", "useCase", "operation"],
-              additionalProperties: false,
-            },
+          curdTriplesPath: {
+            type: "string",
           },
-          missingReportText: { type: "string" },
-          newUseCaseDescriptionText: { type: "string" },
+          newUseCasePath: {
+            type: "string",
+          },
+          previousCurdTriplesPath: {
+            type: "string",
+          },
+          missingReportPath: {
+            type: "string",
+          },
         },
         required: ["action"],
         additionalProperties: false,
@@ -448,11 +383,13 @@ export default definePluginEntry({
         switch (action) {
           case "generate_curd_triples": {
             const result = await generateCurdTriples({
-              dataEntities: requireStringArray("dataEntities", params?.dataEntities),
-              useCases: requireStringArray("useCases", params?.useCases),
-              useCaseDescriptionText: requireNonEmptyString(
-                "useCaseDescriptionText",
-                params?.useCaseDescriptionText,
+              scoperResultPath: requireNonEmptyString(
+                "scoperResultPath",
+                params?.scoperResultPath
+              ),
+              useCaseDescriptionPath: requireNonEmptyString(
+                "useCaseDescriptionPath",
+                params?.useCaseDescriptionPath
               ),
             });
             return toolResult(result);
@@ -460,35 +397,44 @@ export default definePluginEntry({
 
           case "check_curd_completeness": {
             const result = await checkCurdCompleteness({
-              erModelText: requireNonEmptyString("erModelText", params?.erModelText),
-              useCases: requireStringArray("useCases", params?.useCases),
-              curdTriples: requireCurdTriples("curdTriples", params?.curdTriples),
+              erModelPath: requireNonEmptyString("erModelPath", params?.erModelPath),
+              scoperResultPath: requireNonEmptyString(
+                "scoperResultPath",
+                params?.scoperResultPath
+              ),
+              curdTriplesPath: requireNonEmptyString(
+                "curdTriplesPath",
+                params?.curdTriplesPath
+              ),
             });
             return toolResult(result);
           }
 
           case "complete_curd_triples": {
             const result = await completeCurdTriples({
-              erModelText: requireNonEmptyString("erModelText", params?.erModelText),
-              newUseCaseDescriptionText: requireNonEmptyString(
-                "newUseCaseDescriptionText",
-                params?.newUseCaseDescriptionText,
+              erModelPath: requireNonEmptyString("erModelPath", params?.erModelPath),
+              newUseCasePath: requireNonEmptyString(
+                "newUseCasePath",
+                params?.newUseCasePath
               ),
-              previousCurdTriples: requireCurdTriples(
-                "previousCurdTriples",
-                params?.previousCurdTriples,
+              previousCurdTriplesPath: requireNonEmptyString(
+                "previousCurdTriplesPath",
+                params?.previousCurdTriplesPath
               ),
-              missingReportText: requireNonEmptyString(
-                "missingReportText",
-                params?.missingReportText,
+              missingReportPath: requireNonEmptyString(
+                "missingReportPath",
+                params?.missingReportPath
               ),
             });
             return toolResult(result);
           }
 
           case "convert_curd_triples_to_matrix": {
-            const result = convertCurdTriplesToMatrix({
-              curdTriples: requireCurdTriples("curdTriples", params?.curdTriples),
+            const result = await convertCurdTriplesToMatrix({
+              curdTriplesPath: requireNonEmptyString(
+                "curdTriplesPath",
+                params?.curdTriplesPath
+              ),
             });
             return toolResult(result);
           }
@@ -503,31 +449,24 @@ export default definePluginEntry({
       name: "document_exporter",
       label: "Document Exporter",
       description:
-        "导出三个文档：ER 模型文档、修改后的用例模型文档、功能需求文档。",
+        "导出三个文档：ER 模型文档、修改后的用例模型文档、功能需求文档，输入为文件路径。",
       parameters: {
         type: "object",
         properties: {
           projectName: { type: "string" },
-          erModelText: { type: "string" },
-          updatedUseCaseText: { type: "string" },
-          functionalRequirementsText: { type: "string" },
+          erModelPath: { type: "string" },
+          updatedUseCasePath: { type: "string" },
+          functionalRequirementsPath: { type: "string" },
           softwareIntro: { type: "string" },
-          dataEntities: {
-            type: "array",
-            items: { type: "string" },
-          },
-          useCases: {
-            type: "array",
-            items: { type: "string" },
-          },
+          scoperResultPath: { type: "string" },
           artifactPrefix: { type: "string" },
           outputDir: { type: "string" },
         },
         required: [
           "projectName",
-          "erModelText",
-          "updatedUseCaseText",
-          "functionalRequirementsText",
+          "erModelPath",
+          "updatedUseCasePath",
+          "functionalRequirementsPath",
         ],
         additionalProperties: false,
       },
@@ -541,31 +480,19 @@ export default definePluginEntry({
 
         const result = await exportRequirementsDocuments({
           projectName: requireNonEmptyString("projectName", params?.projectName),
-          erModelText: requireNonEmptyString("erModelText", params?.erModelText),
-          updatedUseCaseText: requireNonEmptyString(
-            "updatedUseCaseText",
-            params?.updatedUseCaseText,
+          erModelPath: requireNonEmptyString("erModelPath", params?.erModelPath),
+          updatedUseCasePath: requireNonEmptyString(
+            "updatedUseCasePath",
+            params?.updatedUseCasePath
           ),
-          functionalRequirementsText: requireNonEmptyString(
-            "functionalRequirementsText",
-            params?.functionalRequirementsText,
+          functionalRequirementsPath: requireNonEmptyString(
+            "functionalRequirementsPath",
+            params?.functionalRequirementsPath
           ),
-          softwareIntro:
-            typeof params?.softwareIntro === "string"
-              ? params.softwareIntro
-              : undefined,
-          dataEntities: Array.isArray(params?.dataEntities)
-            ? requireStringArray("dataEntities", params?.dataEntities)
-            : undefined,
-          useCases: Array.isArray(params?.useCases)
-            ? requireStringArray("useCases", params?.useCases)
-            : undefined,
-          artifactPrefix:
-            typeof params?.artifactPrefix === "string"
-              ? params.artifactPrefix
-              : undefined,
-          outputDir:
-            typeof params?.outputDir === "string" ? params.outputDir : undefined,
+          softwareIntro: optionalString(params?.softwareIntro),
+          scoperResultPath: optionalString(params?.scoperResultPath),
+          artifactPrefix: optionalString(params?.artifactPrefix),
+          outputDir: optionalString(params?.outputDir),
         });
 
         return toolResult(result);

@@ -28,7 +28,7 @@ export async function chatOnce(messages: ChatMessage[], model?: string): Promise
         "Content-Type": "application/json",
         Authorization: `Bearer ${config.LLM_API_KEY}`,
       },
-      timeout: 600000,
+      timeout: 240000,
     }
   );
 

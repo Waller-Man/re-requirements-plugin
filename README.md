@@ -1,6 +1,4 @@
-
-
-# RE Requirements Plugin v1.0.0
+# RE Requirements Plugin v1.1.0
 
 一个面向**需求工程建模与文档导出**的 OpenClaw 插件。
 它可以根据用户输入的软件需求描述，分阶段完成：
@@ -13,7 +11,7 @@
 * 功能需求文本生成
 * 最终文档导出
 
-这个项目的设计目标不是单纯“生成一段文本”，而是让 OpenClaw 在对话中调用一套可复用的需求工程工具链，输出结构化中间结果和最终文档。
+v1.1.0：重构了插件的中间结果传递机制，原先由 tool 直接将大段文本结果返回给模型的方式，调整为将中间产物写入本地文件，并通过轻量级返回值 {status, summary, outputPath, outputType} 在各步骤之间传递。基于此，requirement_scoper、use_case_writer、er_model_builder、curd_model_builder、document_exporter 及调试链路已全部升级为 path-based workflow，显著降低了上下文膨胀问题，提升了 OpenClaw 调用过程中的稳定性、可维护性与长流程执行能力；同时保留了原有需求工程流程，并支持在 CURD 缺失场景下进行循环补全与重复复检。
 
 ---
 

@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { chatOnce } from "../llmClient.js";
 import { config } from "../config.js";
+import {
+  readArtifactJson,
+  readArtifactText,
+  saveArtifactAndBuildResult,
+} from "../artifact_io.js";
 
 // -------------------------
 // 通用类型与工具函数
@@ -14,6 +19,62 @@ export const CurdTripleSchema = z.object({
 });
 
 export type CurdTriple = z.infer<typeof CurdTripleSchema>;
+
+// 统一的轻量返回结构：避免把大结果直接返回给模型
+const PathBasedToolOutputSchema = z.object({
+  status: z.enum(["success", "error"]),
+  summary: z.string(),
+  outputPath: z.string().optional(),
+  outputType: z.string().optional(),
+});
+
+type PathBasedToolOutput = z.infer<typeof PathBasedToolOutputSchema>;
+
+// requirement_scoper 的输出文件结构
+const RequirementScoperArtifactSchema = z.object({
+  dataEntitiesText: z.string(),
+  useCasesText: z.string(),
+  dataEntities: z.array(z.string()),
+  useCases: z.array(z.string()),
+});
+
+// 简单用例 / 追加用例 两种产物都兼容
+const UseCaseDescriptionArtifactSchema = z.union([
+  z.object({
+    simpleUseCaseText: z.string(),
+    useCaseList: z.array(z.string()).optional(),
+  }),
+  z.object({
+    appendedSimpleUseCaseText: z.string(),
+    newUseCaseText: z.string(),
+    newUseCaseList: z.array(z.string()),
+  }),
+]);
+
+// ER 模型统一产物
+const ErModelArtifactSchema = z.object({
+  erModelText: z.string(),
+});
+
+// CURD 三元组产物
+const CurdTriplesArtifactSchema = z.object({
+  curdTriplesText: z.string(),
+  curdTriples: z.array(CurdTripleSchema),
+});
+
+// CURD 检查结果产物
+const CheckCurdCompletenessArtifactSchema = z.object({
+  missingReportText: z.string(),
+  isComplete: z.boolean(),
+  suggestedUseCases: z.array(z.string()),
+});
+
+// 矩阵产物
+const CurdMatrixArtifactSchema = z.object({
+  entities: z.array(z.string()),
+  useCases: z.array(z.string()),
+  matrixTable: z.array(z.record(z.string(), z.string())),
+});
 
 // 兼容字符串和数组输入
 function normalizeList(input: string | string[]): string[] {
@@ -104,24 +165,121 @@ function parseCurdTriples(rawText: string): CurdTriple[] {
   throw new Error("无法解析 CURD 三元组。请检查模型输出格式。");
 }
 
+// 尝试把文件按 JSON 读取；如果不是 JSON，则返回 null
+async function tryReadJsonFile(filePath: string): Promise<unknown | null> {
+  const raw = await readArtifactText(filePath);
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+// 读取用例描述文本：兼容 simpleUseCaseText / appendedSimpleUseCaseText
+async function loadUseCaseDescriptionText(filePath: string): Promise<string> {
+  const jsonData = await tryReadJsonFile(filePath);
+
+  if (jsonData !== null) {
+    const parsed = UseCaseDescriptionArtifactSchema.safeParse(jsonData);
+    if (parsed.success) {
+      if ("simpleUseCaseText" in parsed.data) {
+        return parsed.data.simpleUseCaseText.trim();
+      }
+      return parsed.data.appendedSimpleUseCaseText.trim();
+    }
+  }
+
+  // 兜底：当纯文本处理
+  return (await readArtifactText(filePath)).trim();
+}
+
+// 读取新增用例文本：优先读取 newUseCaseText
+async function loadNewUseCaseText(filePath: string): Promise<string> {
+  const jsonData = await tryReadJsonFile(filePath);
+
+  if (jsonData !== null) {
+    const parsed = UseCaseDescriptionArtifactSchema.safeParse(jsonData);
+    if (parsed.success && "newUseCaseText" in parsed.data) {
+      return parsed.data.newUseCaseText.trim();
+    }
+  }
+
+  return (await readArtifactText(filePath)).trim();
+}
+
+// 读取 ER 模型文本
+async function loadErModelText(filePath: string): Promise<string> {
+  const jsonData = await tryReadJsonFile(filePath);
+
+  if (jsonData !== null) {
+    const parsed = ErModelArtifactSchema.safeParse(jsonData);
+    if (parsed.success) {
+      return parsed.data.erModelText.trim();
+    }
+  }
+
+  return (await readArtifactText(filePath)).trim();
+}
+
+// 读取 CURD 三元组
+async function loadCurdTriples(filePath: string): Promise<CurdTriple[]> {
+  const jsonData = await tryReadJsonFile(filePath);
+
+  if (jsonData !== null) {
+    const parsed = CurdTriplesArtifactSchema.safeParse(jsonData);
+    if (parsed.success) {
+      return parsed.data.curdTriples;
+    }
+  }
+
+  // 如果不是结构化产物，则尝试把整个文本当作 CURD 输出解析
+  const rawText = await readArtifactText(filePath);
+  return parseCurdTriples(rawText);
+}
+
+// 读取缺失检查结果
+async function loadMissingReport(filePath: string): Promise<{
+  missingReportText: string;
+  isComplete: boolean;
+  suggestedUseCases: string[];
+}> {
+  const jsonData = await tryReadJsonFile(filePath);
+
+  if (jsonData !== null) {
+    const parsed = CheckCurdCompletenessArtifactSchema.safeParse(jsonData);
+    if (parsed.success) {
+      return parsed.data;
+    }
+  }
+
+  const rawText = (await readArtifactText(filePath)).trim();
+  const isComplete = rawText === "The model is complete.";
+  const suggestedUseCases = isComplete ? [] : normalizeList(rawText);
+
+  return {
+    missingReportText: rawText,
+    isComplete,
+    suggestedUseCases,
+  };
+}
+
 // -------------------------
 // 1) 生成 CURD 三元组
 // -------------------------
 
+// 现在不再直接接 dataEntities / useCases / useCaseDescriptionText
+// 改为从前面步骤生成的文件里读取
 export const GenerateCurdTriplesInputSchema = z.object({
-  dataEntities: z.union([z.string(), z.array(z.string())]),
-  useCases: z.union([z.string(), z.array(z.string())]),
-  useCaseDescriptionText: z.string().min(1, "useCaseDescriptionText 不能为空"),
+  scoperResultPath: z.string().min(1, "scoperResultPath 不能为空"),
+  useCaseDescriptionPath: z.string().min(1, "useCaseDescriptionPath 不能为空"),
 });
 
 export type GenerateCurdTriplesInput = z.infer<
   typeof GenerateCurdTriplesInputSchema
 >;
 
-export const GenerateCurdTriplesOutputSchema = z.object({
-  curdTriplesText: z.string(),
-  curdTriples: z.array(CurdTripleSchema),
-});
+export const GenerateCurdTriplesOutputSchema = PathBasedToolOutputSchema;
 
 export type GenerateCurdTriplesOutput = z.infer<
   typeof GenerateCurdTriplesOutputSchema
@@ -183,13 +341,17 @@ export async function generateCurdTriples(
 ): Promise<GenerateCurdTriplesOutput> {
   const parsedInput = GenerateCurdTriplesInputSchema.parse(input);
 
-  const dataEntities = normalizeList(parsedInput.dataEntities);
-  const useCases = normalizeList(parsedInput.useCases);
+  const scoperArtifact = RequirementScoperArtifactSchema.parse(
+    await readArtifactJson(parsedInput.scoperResultPath)
+  );
+  const useCaseDescriptionText = await loadUseCaseDescriptionText(
+    parsedInput.useCaseDescriptionPath
+  );
 
   const prompt = buildGenerateCurdTriplesPrompt({
-    dataEntities,
-    useCases,
-    useCaseDescriptionText: parsedInput.useCaseDescriptionText,
+    dataEntities: scoperArtifact.dataEntities,
+    useCases: scoperArtifact.useCases,
+    useCaseDescriptionText,
   });
 
   const response = await chatOnce(
@@ -205,10 +367,20 @@ export async function generateCurdTriples(
 
   const curdTriples = parseCurdTriples(response);
 
-  return GenerateCurdTriplesOutputSchema.parse({
+  const artifact = CurdTriplesArtifactSchema.parse({
     curdTriplesText: response.trim(),
     curdTriples,
   });
+
+  return GenerateCurdTriplesOutputSchema.parse(
+    await saveArtifactAndBuildResult({
+      stage: "curd_model_builder_generate_curd_triples",
+      name: "curd_triples",
+      data: artifact,
+      extension: "json",
+      summary: `CURD triples generated successfully. Total triples: ${curdTriples.length}.`,
+    })
+  );
 }
 
 // -------------------------
@@ -216,28 +388,24 @@ export async function generateCurdTriples(
 // -------------------------
 
 export const ConvertCurdTriplesToMatrixInputSchema = z.object({
-  curdTriples: z.array(CurdTripleSchema),
+  curdTriplesPath: z.string().min(1, "curdTriplesPath 不能为空"),
 });
 
 export type ConvertCurdTriplesToMatrixInput = z.infer<
   typeof ConvertCurdTriplesToMatrixInputSchema
 >;
 
-export const ConvertCurdTriplesToMatrixOutputSchema = z.object({
-  entities: z.array(z.string()),
-  useCases: z.array(z.string()),
-  matrixTable: z.array(z.record(z.string(), z.string())),
-});
+export const ConvertCurdTriplesToMatrixOutputSchema = PathBasedToolOutputSchema;
 
 export type ConvertCurdTriplesToMatrixOutput = z.infer<
   typeof ConvertCurdTriplesToMatrixOutputSchema
 >;
 
-export function convertCurdTriplesToMatrix(
+export async function convertCurdTriplesToMatrix(
   input: ConvertCurdTriplesToMatrixInput
-): ConvertCurdTriplesToMatrixOutput {
+): Promise<ConvertCurdTriplesToMatrixOutput> {
   const parsedInput = ConvertCurdTriplesToMatrixInputSchema.parse(input);
-  const triples = parsedInput.curdTriples;
+  const triples = await loadCurdTriples(parsedInput.curdTriplesPath);
 
   const matrix = new Map<string, Map<string, Set<"C" | "U" | "R" | "D">>>();
 
@@ -256,9 +424,7 @@ export function convertCurdTriplesToMatrix(
   }
 
   const useCases = Array.from(matrix.keys()).sort();
-  const entities = Array.from(
-    new Set(triples.map((item) => item.entity))
-  ).sort();
+  const entities = Array.from(new Set(triples.map((item) => item.entity))).sort();
 
   const matrixTable: Array<Record<string, string>> = useCases.map((useCase) => {
     const row: Record<string, string> = {
@@ -273,11 +439,21 @@ export function convertCurdTriplesToMatrix(
     return row;
   });
 
-  return ConvertCurdTriplesToMatrixOutputSchema.parse({
+  const artifact = CurdMatrixArtifactSchema.parse({
     entities,
     useCases,
     matrixTable,
   });
+
+  return ConvertCurdTriplesToMatrixOutputSchema.parse(
+    await saveArtifactAndBuildResult({
+      stage: "curd_model_builder_convert_curd_triples_to_matrix",
+      name: "curd_matrix",
+      data: artifact,
+      extension: "json",
+      summary: `CURD matrix generated successfully. ${useCases.length} use cases and ${entities.length} entities included.`,
+    })
+  );
 }
 
 // -------------------------
@@ -285,20 +461,16 @@ export function convertCurdTriplesToMatrix(
 // -------------------------
 
 export const CheckCurdCompletenessInputSchema = z.object({
-  erModelText: z.string().min(1, "erModelText 不能为空"),
-  useCases: z.union([z.string(), z.array(z.string())]),
-  curdTriples: z.array(CurdTripleSchema),
+  erModelPath: z.string().min(1, "erModelPath 不能为空"),
+  scoperResultPath: z.string().min(1, "scoperResultPath 不能为空"),
+  curdTriplesPath: z.string().min(1, "curdTriplesPath 不能为空"),
 });
 
 export type CheckCurdCompletenessInput = z.infer<
   typeof CheckCurdCompletenessInputSchema
 >;
 
-export const CheckCurdCompletenessOutputSchema = z.object({
-  missingReportText: z.string(),
-  isComplete: z.boolean(),
-  suggestedUseCases: z.array(z.string()),
-});
+export const CheckCurdCompletenessOutputSchema = PathBasedToolOutputSchema;
 
 export type CheckCurdCompletenessOutput = z.infer<
   typeof CheckCurdCompletenessOutputSchema
@@ -355,12 +527,16 @@ export async function checkCurdCompleteness(
 ): Promise<CheckCurdCompletenessOutput> {
   const parsedInput = CheckCurdCompletenessInputSchema.parse(input);
 
-  const useCases = normalizeList(parsedInput.useCases);
+  const erModelText = await loadErModelText(parsedInput.erModelPath);
+  const scoperArtifact = RequirementScoperArtifactSchema.parse(
+    await readArtifactJson(parsedInput.scoperResultPath)
+  );
+  const curdTriples = await loadCurdTriples(parsedInput.curdTriplesPath);
 
   const prompt = buildCheckCurdCompletenessPrompt({
-    erModelText: parsedInput.erModelText,
-    useCases,
-    curdTriples: parsedInput.curdTriples,
+    erModelText,
+    useCases: scoperArtifact.useCases,
+    curdTriples,
   });
 
   const response = await chatOnce(
@@ -378,11 +554,23 @@ export async function checkCurdCompleteness(
   const isComplete = missingReportText === "The model is complete.";
   const suggestedUseCases = isComplete ? [] : normalizeList(missingReportText);
 
-  return CheckCurdCompletenessOutputSchema.parse({
+  const artifact = CheckCurdCompletenessArtifactSchema.parse({
     missingReportText,
     isComplete,
     suggestedUseCases,
   });
+
+  return CheckCurdCompletenessOutputSchema.parse(
+    await saveArtifactAndBuildResult({
+      stage: "curd_model_builder_check_curd_completeness",
+      name: "curd_completeness_check",
+      data: artifact,
+      extension: "json",
+      summary: isComplete
+        ? "CURD model is complete."
+        : `CURD model is incomplete. Suggested use cases: ${suggestedUseCases.length}.`,
+    })
+  );
 }
 
 // -------------------------
@@ -390,21 +578,17 @@ export async function checkCurdCompleteness(
 // -------------------------
 
 export const CompleteCurdTriplesInputSchema = z.object({
-  erModelText: z.string().min(1, "erModelText 不能为空"),
-  newUseCaseDescriptionText: z.string().min(1, "newUseCaseDescriptionText 不能为空"),
-  previousCurdTriples: z.array(CurdTripleSchema),
-  missingReportText: z.string().min(1, "missingReportText 不能为空"),
+  erModelPath: z.string().min(1, "erModelPath 不能为空"),
+  newUseCasePath: z.string().min(1, "newUseCasePath 不能为空"),
+  previousCurdTriplesPath: z.string().min(1, "previousCurdTriplesPath 不能为空"),
+  missingReportPath: z.string().min(1, "missingReportPath 不能为空"),
 });
 
 export type CompleteCurdTriplesInput = z.infer<
   typeof CompleteCurdTriplesInputSchema
 >;
 
-export const CompleteCurdTriplesOutputSchema = z.object({
-  newCurdTriplesText: z.string(),
-  newCurdTriples: z.array(CurdTripleSchema),
-  mergedCurdTriples: z.array(CurdTripleSchema),
-});
+export const CompleteCurdTriplesOutputSchema = PathBasedToolOutputSchema;
 
 export type CompleteCurdTriplesOutput = z.infer<
   typeof CompleteCurdTriplesOutputSchema
@@ -468,11 +652,20 @@ export async function completeCurdTriples(
 ): Promise<CompleteCurdTriplesOutput> {
   const parsedInput = CompleteCurdTriplesInputSchema.parse(input);
 
+  const erModelText = await loadErModelText(parsedInput.erModelPath);
+  const newUseCaseDescriptionText = await loadNewUseCaseText(
+    parsedInput.newUseCasePath
+  );
+  const previousCurdTriples = await loadCurdTriples(
+    parsedInput.previousCurdTriplesPath
+  );
+  const missingReport = await loadMissingReport(parsedInput.missingReportPath);
+
   const prompt = buildCompleteCurdTriplesPrompt({
-    erModelText: parsedInput.erModelText,
-    newUseCaseDescriptionText: parsedInput.newUseCaseDescriptionText,
-    previousCurdTriples: parsedInput.previousCurdTriples,
-    missingReportText: parsedInput.missingReportText,
+    erModelText,
+    newUseCaseDescriptionText,
+    previousCurdTriples,
+    missingReportText: missingReport.missingReportText,
   });
 
   const response = await chatOnce(
@@ -488,14 +681,35 @@ export async function completeCurdTriples(
 
   const newCurdTriples = parseCurdTriples(response);
 
-  const mergedCurdTriples = [
-    ...parsedInput.previousCurdTriples,
-    ...newCurdTriples,
-  ];
+  // 去重合并，避免重复三元组
+  const mergedMap = new Map<string, CurdTriple>();
 
-  return CompleteCurdTriplesOutputSchema.parse({
+  for (const triple of [...previousCurdTriples, ...newCurdTriples]) {
+    const key = `${triple.entity}|||${triple.useCase}|||${triple.operation}`;
+    mergedMap.set(key, triple);
+  }
+
+  const mergedCurdTriples = Array.from(mergedMap.values());
+
+  const artifact = CurdTriplesArtifactSchema.extend({
+    newCurdTriples: z.array(CurdTripleSchema),
+    mergedCurdTriples: z.array(CurdTripleSchema),
+    newCurdTriplesText: z.string(),
+  }).parse({
+    curdTriplesText: stringifyCurdTriples(mergedCurdTriples),
+    curdTriples: mergedCurdTriples,
     newCurdTriplesText: response.trim(),
     newCurdTriples,
     mergedCurdTriples,
   });
+
+  return CompleteCurdTriplesOutputSchema.parse(
+    await saveArtifactAndBuildResult({
+      stage: "curd_model_builder_complete_curd_triples",
+      name: "completed_curd_triples",
+      data: artifact,
+      extension: "json",
+      summary: `CURD triples completed successfully. Added ${newCurdTriples.length} new triples.`,
+    })
+  );
 }

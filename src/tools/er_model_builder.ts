@@ -1,40 +1,101 @@
 import { z } from "zod";
 import { chatOnce } from "../llmClient.js";
 import { config } from "../config.js";
+import {
+  readArtifactJson,
+  readArtifactText,
+  saveArtifactAndBuildResult,
+} from "../artifact_io.js";
 
 // -------------------------
-// 通用小工具
+// 通用 schema / 小工具
 // -------------------------
 
-// 兼容字符串和数组输入
-function normalizeList(input: string | string[]): string[] {
-  if (Array.isArray(input)) {
-    return input.map((item) => item.trim()).filter(Boolean);
+// 统一的轻量返回结构：不再把大正文直接返回给模型
+const PathBasedToolOutputSchema = z.object({
+  status: z.enum(["success", "error"]),
+  summary: z.string(),
+  outputPath: z.string().optional(),
+  outputType: z.string().optional(),
+});
+
+type PathBasedToolOutput = z.infer<typeof PathBasedToolOutputSchema>;
+
+// requirement_scoper 写入文件后的结构
+const RequirementScoperArtifactSchema = z.object({
+  dataEntitiesText: z.string(),
+  useCasesText: z.string(),
+  dataEntities: z.array(z.string()),
+  useCases: z.array(z.string()),
+});
+
+// ER 模型统一落盘结构
+// 这里统一使用 erModelText 这个字段名，方便后续其他 tool 读取
+const ErModelArtifactSchema = z.object({
+  erModelText: z.string(),
+});
+
+// generate_new_use_cases 写入文件后的结构
+const NewUseCasesArtifactSchema = z.object({
+  appendedSimpleUseCaseText: z.string(),
+  newUseCaseText: z.string(),
+  newUseCaseList: z.array(z.string()),
+});
+
+// 尝试把文件按 JSON 读取；如果不是 JSON，则返回 null
+async function tryReadJsonFile(filePath: string): Promise<unknown | null> {
+  const raw = await readArtifactText(filePath);
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+// 读取 ER 模型文本：优先兼容 json，其次兼容纯文本
+async function loadErModelText(filePath: string): Promise<string> {
+  const jsonData = await tryReadJsonFile(filePath);
+
+  if (jsonData !== null) {
+    const parsed = ErModelArtifactSchema.safeParse(jsonData);
+    if (parsed.success) {
+      return parsed.data.erModelText.trim();
+    }
   }
 
-  return input
-    .split(/[，、,]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
+  // 兜底：如果不是 json，就直接把整个文件当文本
+  return (await readArtifactText(filePath)).trim();
+}
+
+// 读取“新增用例文本”：优先从 json 中取 newUseCaseText
+async function loadNewUseCaseText(filePath: string): Promise<string> {
+  const jsonData = await tryReadJsonFile(filePath);
+
+  if (jsonData !== null) {
+    const parsed = NewUseCasesArtifactSchema.safeParse(jsonData);
+    if (parsed.success) {
+      return parsed.data.newUseCaseText.trim();
+    }
+  }
+
+  // 兜底：如果不是 json，就直接把整个文件当文本
+  return (await readArtifactText(filePath)).trim();
 }
 
 // -------------------------
 // 1) 生成初始 ER 模型
 // -------------------------
 
+// 现在不再直接接 dataEntities/useCases，而是接 requirement_scoper 的结果路径
 export const GenerateErModelInputSchema = z.object({
   softwareIntro: z.string().min(1, "softwareIntro 不能为空"),
-  dataEntities: z.union([z.string(), z.array(z.string())]),
-  useCases: z.union([z.string(), z.array(z.string())]),
+  scoperResultPath: z.string().min(1, "scoperResultPath 不能为空"),
 });
 
 export type GenerateErModelInput = z.infer<typeof GenerateErModelInputSchema>;
 
-export const GenerateErModelOutputSchema = z.object({
-  erModelText: z.string(),
-  dataEntities: z.array(z.string()),
-  useCases: z.array(z.string()),
-});
+export const GenerateErModelOutputSchema = PathBasedToolOutputSchema;
 
 export type GenerateErModelOutput = z.infer<typeof GenerateErModelOutputSchema>;
 
@@ -97,8 +158,13 @@ export async function generateErModel(
 ): Promise<GenerateErModelOutput> {
   const parsedInput = GenerateErModelInputSchema.parse(input);
 
-  const dataEntities = normalizeList(parsedInput.dataEntities);
-  const useCases = normalizeList(parsedInput.useCases);
+  // 从第一步 scoper 的输出文件中读取实体和用例
+  const scoperArtifact = RequirementScoperArtifactSchema.parse(
+    await readArtifactJson(parsedInput.scoperResultPath)
+  );
+
+  const dataEntities = scoperArtifact.dataEntities;
+  const useCases = scoperArtifact.useCases;
 
   const prompt = buildGenerateErModelPrompt({
     softwareIntro: parsedInput.softwareIntro,
@@ -117,11 +183,20 @@ export async function generateErModel(
     config.LLM_MODEL
   );
 
-  return GenerateErModelOutputSchema.parse({
+  // 统一把 ER 模型正文写成 erModelText，便于后续通用读取
+  const artifact = ErModelArtifactSchema.parse({
     erModelText: response.trim(),
-    dataEntities,
-    useCases,
   });
+
+  return GenerateErModelOutputSchema.parse(
+    await saveArtifactAndBuildResult({
+      stage: "er_model_builder_generate_er_model",
+      name: "er_model",
+      data: artifact,
+      extension: "json",
+      summary: `Initial ER model generated based on ${dataEntities.length} data entities and ${useCases.length} use cases.`,
+    })
+  );
 }
 
 // -------------------------
@@ -130,16 +205,13 @@ export async function generateErModel(
 
 export const CheckErModelInputSchema = z.object({
   softwareIntro: z.string().min(1, "softwareIntro 不能为空"),
-  dataEntities: z.union([z.string(), z.array(z.string())]),
-  useCases: z.union([z.string(), z.array(z.string())]),
-  erModelText: z.string().min(1, "erModelText 不能为空"),
+  scoperResultPath: z.string().min(1, "scoperResultPath 不能为空"),
+  erModelPath: z.string().min(1, "erModelPath 不能为空"),
 });
 
 export type CheckErModelInput = z.infer<typeof CheckErModelInputSchema>;
 
-export const CheckErModelOutputSchema = z.object({
-  checkedErModelText: z.string(),
-});
+export const CheckErModelOutputSchema = PathBasedToolOutputSchema;
 
 export type CheckErModelOutput = z.infer<typeof CheckErModelOutputSchema>;
 
@@ -189,14 +261,17 @@ export async function checkErModel(
 ): Promise<CheckErModelOutput> {
   const parsedInput = CheckErModelInputSchema.parse(input);
 
-  const dataEntities = normalizeList(parsedInput.dataEntities);
-  const useCases = normalizeList(parsedInput.useCases);
+  // 一份从 scoper 结果里取，一份从已有 erModel 文件里取
+  const scoperArtifact = RequirementScoperArtifactSchema.parse(
+    await readArtifactJson(parsedInput.scoperResultPath)
+  );
+  const erModelText = await loadErModelText(parsedInput.erModelPath);
 
   const prompt = buildCheckErModelPrompt({
     softwareIntro: parsedInput.softwareIntro,
-    dataEntities,
-    useCases,
-    erModelText: parsedInput.erModelText,
+    dataEntities: scoperArtifact.dataEntities,
+    useCases: scoperArtifact.useCases,
+    erModelText,
   });
 
   const response = await chatOnce(
@@ -210,9 +285,19 @@ export async function checkErModel(
     config.LLM_MODEL
   );
 
-  return CheckErModelOutputSchema.parse({
-    checkedErModelText: response.trim(),
+  const artifact = ErModelArtifactSchema.parse({
+    erModelText: response.trim(),
   });
+
+  return CheckErModelOutputSchema.parse(
+    await saveArtifactAndBuildResult({
+      stage: "er_model_builder_check_er_model",
+      name: "checked_er_model",
+      data: artifact,
+      extension: "json",
+      summary: "ER model checked and improved successfully.",
+    })
+  );
 }
 
 // -------------------------
@@ -220,17 +305,17 @@ export async function checkErModel(
 // -------------------------
 
 export const CompleteErModelInputSchema = z.object({
-  oldErModelText: z.string().min(1, "oldErModelText 不能为空"),
-  newUseCaseText: z.string().min(1, "newUseCaseText 不能为空"),
+  oldErModelPath: z.string().min(1, "oldErModelPath 不能为空"),
+  newUseCasePath: z.string().min(1, "newUseCasePath 不能为空"),
 });
 
 export type CompleteErModelInput = z.infer<typeof CompleteErModelInputSchema>;
 
-export const CompleteErModelOutputSchema = z.object({
-  completedErModelText: z.string(),
-});
+export const CompleteErModelOutputSchema = PathBasedToolOutputSchema;
 
-export type CompleteErModelOutput = z.infer<typeof CompleteErModelOutputSchema>;
+export type CompleteErModelOutput = z.infer<
+  typeof CompleteErModelOutputSchema
+>;
 
 // 构造“根据新增用例补全 ER 模型”的 prompt
 function buildCompleteErModelPrompt(params: {
@@ -273,9 +358,13 @@ export async function completeErModel(
 ): Promise<CompleteErModelOutput> {
   const parsedInput = CompleteErModelInputSchema.parse(input);
 
+  // 两边都从 path 读取，避免把大正文传给模型
+  const oldErModelText = await loadErModelText(parsedInput.oldErModelPath);
+  const newUseCaseText = await loadNewUseCaseText(parsedInput.newUseCasePath);
+
   const prompt = buildCompleteErModelPrompt({
-    oldErModelText: parsedInput.oldErModelText,
-    newUseCaseText: parsedInput.newUseCaseText,
+    oldErModelText,
+    newUseCaseText,
   });
 
   const response = await chatOnce(
@@ -289,74 +378,17 @@ export async function completeErModel(
     config.LLM_MODEL
   );
 
-  return CompleteErModelOutputSchema.parse({
-    completedErModelText: response.trim(),
+  const artifact = ErModelArtifactSchema.parse({
+    erModelText: response.trim(),
   });
-}
 
-// -------------------------
-// 4) 生成 ER 图 PlantUML 代码
-// -------------------------
-
-export const GenerateErCodeInputSchema = z.object({
-  erModelText: z.string().min(1, "erModelText 不能为空"),
-});
-
-export type GenerateErCodeInput = z.infer<typeof GenerateErCodeInputSchema>;
-
-export const GenerateErCodeOutputSchema = z.object({
-  erCode: z.string(),
-});
-
-export type GenerateErCodeOutput = z.infer<typeof GenerateErCodeOutputSchema>;
-
-// 构造“生成 ER 图 PlantUML 代码”的 prompt
-function buildGenerateErCodePrompt(erModelText: string): string {
-  return `
-You are a tool that generates PlantUML E-R diagram code from a conceptual E-R model.
-
-Conceptual E-R Model:
-${erModelText}
-
-Instructions:
-1. Generate valid PlantUML E-R diagram code.
-2. Use entity definitions rather than class definitions.
-3. Include all important entities in the ER model.
-4. Include meaningful relationship names and cardinalities.
-5. Do not include methods or operations.
-6. Do not annotate primary keys or foreign keys.
-7. Return only valid PlantUML code.
-
-Example:
-@startuml
-entity User
-entity Order
-User "1" --> "0..*" Order : places
-@enduml
-
-Please answer in English.
-`.trim();
-}
-
-export async function generateErCode(
-  input: GenerateErCodeInput
-): Promise<GenerateErCodeOutput> {
-  const parsedInput = GenerateErCodeInputSchema.parse(input);
-
-  const prompt = buildGenerateErCodePrompt(parsedInput.erModelText);
-
-  const response = await chatOnce(
-    [
-      {
-        role: "system",
-        content: "You generate valid PlantUML ER diagram code.",
-      },
-      { role: "user", content: prompt },
-    ],
-    config.LLM_MODEL
+  return CompleteErModelOutputSchema.parse(
+    await saveArtifactAndBuildResult({
+      stage: "er_model_builder_complete_er_model",
+      name: "completed_er_model",
+      data: artifact,
+      extension: "json",
+      summary: "ER model completed based on newly added use cases.",
+    })
   );
-
-  return GenerateErCodeOutputSchema.parse({
-    erCode: response.trim(),
-  });
 }

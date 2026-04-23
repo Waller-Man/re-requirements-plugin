@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { chatOnce } from "../llmClient.js";
 import { config } from "../config.js";
+import {
+  readArtifactJson,
+  readArtifactText,
+  saveArtifactAndBuildResult,
+} from "../artifact_io.js";
 
 // -------------------------
 // 通用小工具
@@ -22,24 +27,115 @@ function normalizeList(input: string | string[]): string[] {
   return splitCommaLike(input);
 }
 
+// 所有 tool 统一使用的轻量返回结构
+const PathBasedToolOutputSchema = z.object({
+  status: z.enum(["success", "error"]),
+  summary: z.string(),
+  outputPath: z.string().optional(),
+  outputType: z.string().optional(),
+});
+
+type PathBasedToolOutput = z.infer<typeof PathBasedToolOutputSchema>;
+
+// requirement_scoper 写入文件后的结构
+const RequirementScoperArtifactSchema = z.object({
+  dataEntitiesText: z.string(),
+  useCasesText: z.string(),
+  dataEntities: z.array(z.string()),
+  useCases: z.array(z.string()),
+});
+
+// generateSimpleUseCases 写入文件后的结构
+const SimpleUseCasesArtifactSchema = z.object({
+  simpleUseCaseText: z.string(),
+  useCaseList: z.array(z.string()),
+});
+
+// generateNewUseCases 写入文件后的结构
+const NewUseCasesArtifactSchema = z.object({
+  appendedSimpleUseCaseText: z.string(),
+  newUseCaseText: z.string(),
+  newUseCaseList: z.array(z.string()),
+});
+
+// 生成功能需求写入文件后的结构
+const FunctionalRequirementsArtifactSchema = z.object({
+  functionalRequirementsText: z.string(),
+});
+
+// 方便兼容“简单用例初版”和“追加新用例版”
+const ExistingUseCaseArtifactSchema = z.union([
+  z.object({
+    simpleUseCaseText: z.string(),
+  }),
+  z.object({
+    appendedSimpleUseCaseText: z.string(),
+  }),
+]);
+
+// 如果后面 er_model_builder 也改成保存 json，这里可以直接读 erModelText
+const ErModelJsonArtifactSchema = z.object({
+  erModelText: z.string(),
+});
+
+// 尝试把文件按 JSON 读取；如果不是 JSON，则返回 null
+async function tryReadJsonFile(filePath: string): Promise<unknown | null> {
+  const raw = await readArtifactText(filePath);
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+// 读取已有用例文本：既兼容 json，也兼容纯文本
+async function loadExistingUseCaseText(filePath: string): Promise<string> {
+  const jsonData = await tryReadJsonFile(filePath);
+
+  if (jsonData !== null) {
+    const parsed = ExistingUseCaseArtifactSchema.safeParse(jsonData);
+    if (parsed.success) {
+      if ("simpleUseCaseText" in parsed.data) {
+        return parsed.data.simpleUseCaseText.trim();
+      }
+      return parsed.data.appendedSimpleUseCaseText.trim();
+    }
+  }
+
+  // 兜底：如果不是 json，就把整个文件当纯文本
+  return (await readArtifactText(filePath)).trim();
+}
+
+// 读取 ER 模型文本：优先兼容 json，其次兼容纯文本
+async function loadErModelText(filePath: string): Promise<string> {
+  const jsonData = await tryReadJsonFile(filePath);
+
+  if (jsonData !== null) {
+    const parsed = ErModelJsonArtifactSchema.safeParse(jsonData);
+    if (parsed.success) {
+      return parsed.data.erModelText.trim();
+    }
+  }
+
+  return (await readArtifactText(filePath)).trim();
+}
+
 // -------------------------
 // 1) 生成简单用例描述
 // -------------------------
 
+// 现在不再直接接 dataEntities/useCases，而是接上一步 requirement_scoper 的结果路径
 export const GenerateSimpleUseCasesInputSchema = z.object({
   softwareIntro: z.string().min(1, "softwareIntro 不能为空"),
-  dataEntities: z.union([z.string(), z.array(z.string())]),
-  useCases: z.union([z.string(), z.array(z.string())]),
+  scoperResultPath: z.string().min(1, "scoperResultPath 不能为空"),
 });
 
 export type GenerateSimpleUseCasesInput = z.infer<
   typeof GenerateSimpleUseCasesInputSchema
 >;
 
-export const GenerateSimpleUseCasesOutputSchema = z.object({
-  simpleUseCaseText: z.string(),
-  useCaseList: z.array(z.string()),
-});
+export const GenerateSimpleUseCasesOutputSchema = PathBasedToolOutputSchema;
 
 export type GenerateSimpleUseCasesOutput = z.infer<
   typeof GenerateSimpleUseCasesOutputSchema
@@ -110,8 +206,13 @@ export async function generateSimpleUseCases(
 ): Promise<GenerateSimpleUseCasesOutput> {
   const parsedInput = GenerateSimpleUseCasesInputSchema.parse(input);
 
-  const dataEntities = normalizeList(parsedInput.dataEntities);
-  const useCaseList = normalizeList(parsedInput.useCases);
+  // 读取 requirement_scoper 的输出文件
+  const scoperArtifact = RequirementScoperArtifactSchema.parse(
+    await readArtifactJson(parsedInput.scoperResultPath)
+  );
+
+  const dataEntities = scoperArtifact.dataEntities;
+  const useCaseList = scoperArtifact.useCases;
 
   let simpleUseCaseText = "";
 
@@ -135,10 +236,20 @@ export async function generateSimpleUseCases(
     simpleUseCaseText += `\n\n${formatted}`;
   }
 
-  return GenerateSimpleUseCasesOutputSchema.parse({
+  const artifact = SimpleUseCasesArtifactSchema.parse({
     simpleUseCaseText: simpleUseCaseText.trim(),
     useCaseList,
   });
+
+  return GenerateSimpleUseCasesOutputSchema.parse(
+    await saveArtifactAndBuildResult({
+      stage: "use_case_writer_generate_simple_use_cases",
+      name: "simple_use_cases",
+      data: artifact,
+      extension: "json",
+      summary: `Simple use cases generated for ${useCaseList.length} use cases.`,
+    })
+  );
 }
 
 // -------------------------
@@ -147,7 +258,9 @@ export async function generateSimpleUseCases(
 
 export const GenerateNewUseCasesInputSchema = z.object({
   softwareIntro: z.string().min(1, "softwareIntro 不能为空"),
-  existingSimpleUseCaseText: z.string().min(1, "existingSimpleUseCaseText 不能为空"),
+  existingSimpleUseCasePath: z
+    .string()
+    .min(1, "existingSimpleUseCasePath 不能为空"),
   newUseCases: z.union([z.string(), z.array(z.string())]),
 });
 
@@ -155,11 +268,7 @@ export type GenerateNewUseCasesInput = z.infer<
   typeof GenerateNewUseCasesInputSchema
 >;
 
-export const GenerateNewUseCasesOutputSchema = z.object({
-  appendedSimpleUseCaseText: z.string(),
-  newUseCaseText: z.string(),
-  newUseCaseList: z.array(z.string()),
-});
+export const GenerateNewUseCasesOutputSchema = PathBasedToolOutputSchema;
 
 export type GenerateNewUseCasesOutput = z.infer<
   typeof GenerateNewUseCasesOutputSchema
@@ -227,7 +336,11 @@ export async function generateNewUseCases(
 
   const newUseCaseList = normalizeList(parsedInput.newUseCases);
 
-  let appendedSimpleUseCaseText = parsedInput.existingSimpleUseCaseText.trim();
+  // 这里不再直接接正文，而是从 path 中读取已有用例文本
+  let appendedSimpleUseCaseText = await loadExistingUseCaseText(
+    parsedInput.existingSimpleUseCasePath
+  );
+
   let lastNewUseCaseText = "";
 
   for (const newUseCase of newUseCaseList) {
@@ -249,11 +362,21 @@ export async function generateNewUseCases(
     appendedSimpleUseCaseText += `\n\n${lastNewUseCaseText}`;
   }
 
-  return GenerateNewUseCasesOutputSchema.parse({
+  const artifact = NewUseCasesArtifactSchema.parse({
     appendedSimpleUseCaseText: appendedSimpleUseCaseText.trim(),
     newUseCaseText: lastNewUseCaseText,
     newUseCaseList,
   });
+
+  return GenerateNewUseCasesOutputSchema.parse(
+    await saveArtifactAndBuildResult({
+      stage: "use_case_writer_generate_new_use_cases",
+      name: "new_use_cases",
+      data: artifact,
+      extension: "json",
+      summary: `New use cases appended. Added ${newUseCaseList.length} use cases.`,
+    })
+  );
 }
 
 // -------------------------
@@ -262,17 +385,16 @@ export async function generateNewUseCases(
 
 export const GenerateFunctionalRequirementsInputSchema = z.object({
   softwareIntro: z.string().min(1, "softwareIntro 不能为空"),
-  erModel: z.string().min(1, "erModel 不能为空"),
-  simpleUseCaseText: z.string().min(1, "simpleUseCaseText 不能为空"),
+  erModelPath: z.string().min(1, "erModelPath 不能为空"),
+  simpleUseCasePath: z.string().min(1, "simpleUseCasePath 不能为空"),
 });
 
 export type GenerateFunctionalRequirementsInput = z.infer<
   typeof GenerateFunctionalRequirementsInputSchema
 >;
 
-export const GenerateFunctionalRequirementsOutputSchema = z.object({
-  functionalRequirementsText: z.string(),
-});
+export const GenerateFunctionalRequirementsOutputSchema =
+  PathBasedToolOutputSchema;
 
 export type GenerateFunctionalRequirementsOutput = z.infer<
   typeof GenerateFunctionalRequirementsOutputSchema
@@ -331,10 +453,16 @@ export async function generateFunctionalRequirements(
 ): Promise<GenerateFunctionalRequirementsOutput> {
   const parsedInput = GenerateFunctionalRequirementsInputSchema.parse(input);
 
+  // ER 模型和用例描述都从 path 读取
+  const erModel = await loadErModelText(parsedInput.erModelPath);
+  const simpleUseCaseText = await loadExistingUseCaseText(
+    parsedInput.simpleUseCasePath
+  );
+
   const prompt = buildFunctionalRequirementsPrompt({
     softwareIntro: parsedInput.softwareIntro,
-    erModel: parsedInput.erModel,
-    simpleUseCaseText: parsedInput.simpleUseCaseText,
+    erModel,
+    simpleUseCaseText,
   });
 
   const response = await chatOnce(
@@ -349,84 +477,17 @@ export async function generateFunctionalRequirements(
     config.LLM_MODEL
   );
 
-  return GenerateFunctionalRequirementsOutputSchema.parse({
+  const artifact = FunctionalRequirementsArtifactSchema.parse({
     functionalRequirementsText: response.trim(),
   });
-}
 
-// -------------------------
-// 4) 生成用例图 PlantUML 代码
-// -------------------------
-
-export const GenerateUseCaseDiagramCodeInputSchema = z.object({
-  useCases: z.union([z.string(), z.array(z.string())]),
-});
-
-export type GenerateUseCaseDiagramCodeInput = z.infer<
-  typeof GenerateUseCaseDiagramCodeInputSchema
->;
-
-export const GenerateUseCaseDiagramCodeOutputSchema = z.object({
-  useCaseDiagramCode: z.string(),
-  useCaseList: z.array(z.string()),
-});
-
-export type GenerateUseCaseDiagramCodeOutput = z.infer<
-  typeof GenerateUseCaseDiagramCodeOutputSchema
->;
-
-// 构造“用例图代码生成”的 prompt
-function buildUseCaseDiagramCodePrompt(useCases: string[]): string {
-  return `
-You are responsible for generating PlantUML use case diagram code.
-
-Use Case Model:
-${useCases.join(", ")}
-
-Instructions:
-1. Generate a complete PlantUML use case diagram.
-2. Use clear actor and use case relationships.
-3. Output only valid PlantUML code.
-4. Do not output explanations or comments outside the code.
-
-Example:
-@startuml
-left to right direction
-actor Customer
-actor Administrator
-
-rectangle System {
-  Customer -- (Browse Books)
-  Customer -- (Place Order)
-  Administrator -- (Manage Orders)
-}
-@enduml
-
-Please answer in English.
-`.trim();
-}
-
-export async function generateUseCaseDiagramCode(
-  input: GenerateUseCaseDiagramCodeInput
-): Promise<GenerateUseCaseDiagramCodeOutput> {
-  const parsedInput = GenerateUseCaseDiagramCodeInputSchema.parse(input);
-  const useCaseList = normalizeList(parsedInput.useCases);
-
-  const prompt = buildUseCaseDiagramCodePrompt(useCaseList);
-
-  const response = await chatOnce(
-    [
-      {
-        role: "system",
-        content: "You generate PlantUML use case diagram code.",
-      },
-      { role: "user", content: prompt },
-    ],
-    config.LLM_MODEL
+  return GenerateFunctionalRequirementsOutputSchema.parse(
+    await saveArtifactAndBuildResult({
+      stage: "use_case_writer_generate_functional_requirements",
+      name: "functional_requirements",
+      data: artifact,
+      extension: "json",
+      summary: "Functional requirements generated and saved.",
+    })
   );
-
-  return GenerateUseCaseDiagramCodeOutputSchema.parse({
-    useCaseDiagramCode: response.trim(),
-    useCaseList,
-  });
 }
